@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template_string, session, redirect, url_for
+from flask import Flask, request, render_template_string, session, redirect
 from flask_wtf.csrf import CSRFProtect
 import sqlite3
 import secrets
@@ -10,9 +10,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "clave_por_defecto")
+app.secret_key = os.getenv("SECRET_KEY") or secrets.token_hex(32)
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-app.config["SESSION_COOKIE_SECURE"] = False
+app.config["SESSION_COOKIE_SECURE"] = os.getenv("FLASK_ENV") == "production"
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 csrf = CSRFProtect(app)
 oauth = OAuth(app)
@@ -30,7 +30,9 @@ auth0 = oauth.register(
 @app.after_request
 def add_security_headers(response):
     response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['Content-Security-Policy'] = "frame-ancestors 'none';"
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['Content-Security-Policy'] = "default-src 'self'; frame-ancestors 'none'; form-action 'self';"
     return response
 
 def get_db_connection(query, params=()):
@@ -47,10 +49,8 @@ def get_or_create_user(username):
     conn = sqlite3.connect('database.db')
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, password TEXT, role TEXT, session_token TEXT)")
-    cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
+    cursor.execute("SELECT id, role FROM users WHERE username = ?", (username,))
     user = cursor.fetchone()
-    
     if not user:
         cursor.execute(
             "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
@@ -62,7 +62,6 @@ def get_or_create_user(username):
     else:
         user_id = user['id']
         role = user['role']
-        
     conn.close()
     return user_id, role
 
@@ -75,16 +74,16 @@ def admin_required(f):
     def decorated_function(*args, **kwargs):
         user_id = session.get('user_id')
         cookie_token = session.get('session_token')
-        
+
         if not user_id or not cookie_token:
             return redirect('/login')
-            
+
         user = get_user_by_id(user_id)
-        
+
         if not user or user['role'] != 'admin' or user['session_token'] != cookie_token:
             session.clear()
             return redirect('/logout')
-            
+
         return f(*args, **kwargs)
     return decorated_function
 
@@ -98,11 +97,10 @@ def index():
 @app.route('/login')
 def login():
     if not os.getenv("AUTH0_DOMAIN"):
-        # Modo simulación local si no hay credenciales de Auth0 configuradas
         session['user_id'] = 1
         session['username'] = 'user2'
         session['role'] = 'user'
-        session['session_token'] = 'mock_token'
+        session['session_token'] = secrets.token_hex(16)
         return redirect('/dashboard')
     return auth0.authorize_redirect(
         redirect_uri=os.getenv("AUTH0_CALLBACK_URL")
@@ -115,10 +113,10 @@ def callback():
     except (MismatchingStateError, Exception):
         session.clear()
         return redirect('/logout')
-        
+
     userinfo = token.get("userinfo", {})
     username = userinfo.get("email") or userinfo.get("nickname") or userinfo.get("name")
-    
+
     if username:
         user_id, role = get_or_create_user(username)
         active_token = secrets.token_hex(16)
@@ -128,7 +126,7 @@ def callback():
         session["role"] = role
         session["user"] = userinfo
         session["session_token"] = active_token
-        
+
     return redirect("/dashboard")
 
 @app.route('/logout')
@@ -141,9 +139,12 @@ def logout():
 
 @app.route('/dashboard', methods=['GET', 'POST'])
 def dashboard():
+    if 'user_id' not in session:
+        return redirect('/login')
     return render_template_string('''
         <h1>Welcome, {{ session.get('username', 'user 2!') }}</h1>
         <form method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="text" name="task" placeholder="New task">
             <button type="submit">Add Task</button>
         </form>
@@ -152,4 +153,4 @@ def dashboard():
     ''')
 
 if __name__ == '__main__':
-    app.run(port=5000, debug=True)
+    app.run(host='127.0.0.1', port=5000, debug=False)
