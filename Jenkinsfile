@@ -63,8 +63,16 @@ pipeline {
                     . ${VENV_NAME}/bin/activate
                     nohup python3 app.py > flask.log 2>&1 &
                     APP_PID=$!
-                    sleep 4
 
+                    for i in $(seq 1 15); do
+                        if curl -s http://127.0.0.1:5000 > /dev/null; then
+                            echo "Flask listo en http://127.0.0.1:5000"
+                            break
+                        fi
+                        sleep 1
+                    done
+
+                    chmod 777 .
                     docker run --rm --network="host" \
                         -e JAVA_OPTS="-Xmx512m" \
                         -v $(pwd):/zap/wrk/:rw \
@@ -72,6 +80,7 @@ pipeline {
                         zap-baseline.py -t http://127.0.0.1:5000 -r zap-report.html || true
 
                     kill $APP_PID || true
+                    ls -lh zap-report.html || cat flask.log
                 '''
             }
         }
