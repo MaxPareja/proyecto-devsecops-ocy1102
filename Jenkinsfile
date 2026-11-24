@@ -9,10 +9,10 @@ pipeline {
     stages {
         stage('1. Dependency Management') {
             steps {
-                echo "==> [Jenkins Manual] Verificando requirements.txt..."
+                echo "==> [Jenkins] Verificando requirements.txt..."
                 sh '''
                     if [ ! -f "requirements.txt" ]; then
-                        echo "Error: No se encontró el archivo requirements.txt en el repositorio"
+                        echo "Error: No se encontró requirements.txt"
                         exit 1
                     fi
                     cat requirements.txt
@@ -22,7 +22,7 @@ pipeline {
 
         stage('2. Build') {
             steps {
-                echo "==> [Jenkins Manual] Configurando entorno virtual e instalando dependencias..."
+                echo "==> [Jenkins] Creando entorno virtual e instalando dependencias..."
                 sh '''
                     python3 -m venv ${VENV_NAME}
                     . ${VENV_NAME}/bin/activate
@@ -32,31 +32,54 @@ pipeline {
             }
         }
 
-        stage('3. Test') {
+        stage('3. SAST (Bandit)') {
             steps {
-                echo "==> [Jenkins Manual] [TEST] Aquí se simulan las pruebas unitarias..."
-                sh 'echo "Pruebas superadas con éxito en el workspace de Jenkins."'
+                echo "==> [SAST] Ejecutando análisis estático con Bandit sobre app.py..."
+                sh '''
+                    . ${VENV_NAME}/bin/activate
+                    bandit -r . -x ./${VENV_NAME} -f txt -o bandit-report.txt || true
+                    cat bandit-report.txt
+                '''
             }
         }
 
-        stage('4. Deploy (Simulado)') {
+        stage('4. Test') {
             steps {
-                echo "==> [Jenkins Manual] Desplegando en la máquina Kali Linux..."
+                echo "==> [Test] Verificando sintaxis de la aplicación..."
+                sh '''
+                    . ${VENV_NAME}/bin/activate
+                    python3 -m py_compile app.py
+                '''
+            }
+        }
+
+        stage('5. Deploy & DAST (OWASP ZAP)') {
+            steps {
+                echo "==> [Deploy & DAST] Desplegando app y ejecutando OWASP ZAP..."
                 sh '''
                     sudo mkdir -p ${DEPLOY_DIR}
-                    sudo cp app.py requirements.txt ${DEPLOY_DIR}/
-                    echo "¡Despliegue manual desde Jenkins completado en ${DEPLOY_DIR}!"
+                    sudo cp -r app.py requirements.txt ${DEPLOY_DIR}/
+
+                    . ${VENV_NAME}/bin/activate
+                    nohup python3 app.py > flask.log 2>&1 &
+                    APP_PID=$!
+                    sleep 4
+
+                    docker run --rm --network="host" \
+                        -e JAVA_OPTS="-Xmx512m" \
+                        -v $(pwd):/zap/wrk/:rw \
+                        ghcr.io/zaproxy/zaproxy:stable \
+                        zap-baseline.py -t http://127.0.0.1:5000 -r zap-report.html || true
+
+                    kill $APP_PID || true
                 '''
             }
         }
     }
 
     post {
-        success {
-            echo "¡El build manual finalizó correctamente!"
-        }
-        failure {
-            echo "El pipeline falló durante la ejecución manual."
+        always {
+            archiveArtifacts artifacts: 'bandit-report.txt, zap-report.html', allowEmptyArchive: true
         }
     }
 }
